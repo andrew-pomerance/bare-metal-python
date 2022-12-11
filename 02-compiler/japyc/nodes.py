@@ -1,6 +1,8 @@
 import ast
 import errors
 
+from llvmlite import ir
+
 def JapycMeta(type):
     def __init__(cls, name, bases, dct):
         fields = dct['_fields']
@@ -15,6 +17,9 @@ def JapycMeta(type):
 class JapycAST(ast.AST):
     __metaclass__ = JapycMeta
 
+    def emit_code(self, visitor):
+        return None
+
 class JapycModule(JapycAST):
     _fields = ['body']
 
@@ -28,7 +33,11 @@ class JapycModule(JapycAST):
         return JapycModule(visitor.visit_with_remove(node.body))
     
     # what to do with it
-    
+    def emit_code(self, visitor):
+        visitor.module = ir.Module(name=visitor.filename)
+        visitor.recurse(self.body)
+        return visitor.module
+        
 
 class JapycFunctionDef(JapycAST):
     _fields = ['name', 'args', 'body']
@@ -42,6 +51,18 @@ class JapycFunctionDef(JapycAST):
         args = [JapycVariable(a.arg) for a in node.args.args]
         return JapycFunctionDef(node.name, args, body)
         
+    def emit_code(self, visitor):
+        # hard coded return value, hardcoded 64 bit integers
+        function_type = ir.FunctionType(ir.VoidType(), [ir.IntType(64) for _ in self.args])  
+        fn = ir.Function(visitor.module, function_type, name=self.name)
+        block = fn.append_basic_block(name='entry')
+        visitor.functions[self.name] = fn
+        visitor.builder = ir.IRBuilder(block)  # this should be an argument?  it's like a stack I think
+        # lookup table for function arguments
+        visitor.function_arguments = {ast_arg.name: llvm_arg for ast_arg,llvm_arg in zip(self.args, fn.args)}
+        visitor.recurse(self.body)
+        visitor.builder.ret_void()    
+
 class JapycVariable(JapycAST):
     _fields = ['name']
 
@@ -51,6 +72,13 @@ class JapycVariable(JapycAST):
     @staticmethod
     def create_from_node(node, visitor, constants):
         return JapycVariable(node.id)
+
+    def emit_code(self, visitor):
+        if self.name in visitor.function_arguments:
+            return visitor.function_arguments[self.name]
+        else:
+            raise NotImplementedError()
+
 
 class JapycPoke(JapycAST):
     _fields = ['address', 'value', 'bits']
@@ -74,6 +102,13 @@ class JapycPoke(JapycAST):
 
         return JapycPoke(visitor.visit(node.args[0]),
             visitor.visit(node.args[1]), int(bits))
+
+    def emit_code(self, visitor):
+        int_type = ir.IntType(self.bits)
+        addr = visitor.builder.inttoptr(visitor.visit(self.address), int_type.as_pointer())
+        value = visitor.visit(self.value)
+        visitor.builder.store(value, addr)
+
             
 class JapycFunctionCall(JapycAST):
     _fields = ['fn', 'args']
@@ -85,6 +120,10 @@ class JapycFunctionCall(JapycAST):
     def create_from_node(node, visitor, constants):
         args = visitor.visit_with_remove(node.args)
         return JapycFunctionCall(node.func.id, args)
+
+    def emit_code(self, visitor):
+        args = visitor.recurse(self.args)
+        visitor.builder.call(visitor.functions[self.fn], args)
        
 class JapycInteger(JapycAST):
     _fields = ['value']
@@ -122,7 +161,10 @@ class JapycInteger(JapycAST):
             if node.attr not in constants[node.value.id]:
                 raise errors.JapycError(f'{node.attr} is not a member of the {node.value.id} enum')
             return JapycInteger(constants[node.value.id][node.attr])
-        
+
+    def emit_code(self, visitor):        
+        return ir.Constant(ir.IntType(64), self.value)
+    
 class JapycChar(JapycAST):
     _fields = ['value']
         
@@ -148,6 +190,14 @@ class JapycBinOp(JapycAST):
             return JapycInteger(_do_op(left.value, right.value))
         else:
             return JapycBinOp(node.op, left, right)
+
+    def emit_code(self, visitor):
+        a = visitor.visit(self.left)
+        b = visitor.visit(self.right)
+        if isinstance(self.op, ast.Add):
+            return visitor.builder.add(a, b)
+        elif isinstance(self.op, ast.Mult):
+            return visitor.builder.mul(a, b)
 
 class JapycEnum(JapycAST):
     _fields = []

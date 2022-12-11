@@ -89,28 +89,6 @@ class JapycVisitor(ast.NodeVisitor):
     def visit_Expr(self, node):
         return self.visit(node.value)
     
-    # def visit_ClassDef(self, node):
-    #     assert len(node.bases) == 1
-    #     if node.bases[0].id != 'Enum':
-    #         raise NotImplementedError()
-    #     enum_dict = {}
-    #     for enum_node in node.body:
-    #         # each node in an enum classdef body is an Assign node
-    #         # if there are any shenanigans, go ahead and barf
-    #         assert isinstance(enum_node, ast.Assign)
-    #         assert len(enum_node.targets) == 1
-    #         assert isinstance(enum_node.targets[0], ast.Name)
-    #         assert isinstance(enum_node.value, ast.Num)
-    #         enum_dict[enum_node.targets[0].id] = enum_node.value.n
-    #     self.enums[node.name] = enum_dict
-    #     return None
-            
-    # def visit_Attribute(self, node):
-    #     assert isinstance(node.value, ast.Name)
-    #     assert node.value.id in self.enums
-    #     assert node.attr in self.enums[node.value.id]
-    #     return nodes.JapycInteger(self.enums[node.value.id][node.attr])
-        
     def generic_visit(self, node):
         ast_node_name = node.__class__.__name__
         default_japyc_node = self.defaults.get(ast_node_name, None)
@@ -132,64 +110,14 @@ class LLVMEmitter(ast.NodeVisitor):
         self.filename = filename
         self.functions = {}
         
-    def _recurse(self, node_list):
+    def recurse(self, node_list):
         if node_list:
             return [self.visit(child) for child in node_list]     
         else:
             return []   
-                
-        
-    def visit_JapycModule(self, node):
-        self.module = ir.Module(name=self.filename)        
-        self._recurse(node.body)
-        return self.module
-        
-    def visit_JapycFunctionDef(self, node):
-        # hard coded return value, hardcoded 64 bit integers
-        function_type = ir.FunctionType(ir.VoidType(), [ir.IntType(64) for _ in node.args])  
-        fn = ir.Function(self.module, function_type, name=node.name)
-        block = fn.append_basic_block(name='entry')
-        self.functions[node.name] = fn
-        self.builder = ir.IRBuilder(block)
-        # lookup table for function arguments
-        self.function_arguments = {ast_arg.name: llvm_arg for ast_arg,llvm_arg in zip(node.args, fn.args)}
-        
-        self._recurse(node.body)
-            
-        self.builder.ret_void()
-        
-        
-    def visit_JapycBinOp(self, node):
-        a = self.visit(node.left)
-        b = self.visit(node.right)
-        if isinstance(node.op, ast.Add):
-            return self.builder.add(a, b)
-        elif isinstance(node.op, ast.Mult):
-            return self.builder.mul(a, b)
-        
-    def visit_JapycInteger(self, node):
-        return ir.Constant(ir.IntType(64), node.value)
-
-    def visit_JapycVariable(self, node):
-        if node.name in self.function_arguments:
-            return self.function_arguments[node.name]
-        else:
-            raise NotImplementedError()
-    
-    def visit_JapycPoke(self, node):        
-        int_type = ir.IntType(node.bits)
-        addr = self.builder.inttoptr(self.visit(node.address), int_type.as_pointer())
-        value = self.visit(node.value)
-        self.builder.store(value, addr)
-        
-    def visit_JapycFunctionCall(self, node):
-        args = self._recurse(node.args)
-        self.builder.call(self.functions[node.fn], args)
-
-        
+      
     def generic_visit(self, node):
-        return None
-        # raise NotImplementedError('node type not implemented: {}'.format(node.__class__.__name__))        
+        return node.emit_code(self)
         
 def compile_ir(ir_module):
     """
