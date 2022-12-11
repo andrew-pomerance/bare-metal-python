@@ -110,12 +110,6 @@ class LLVMEmitter(ast.NodeVisitor):
         self.filename = filename
         self.functions = {}
         
-    def recurse(self, node_list):
-        if node_list:
-            return [self.visit(child) for child in node_list]     
-        else:
-            return []   
-      
     def generic_visit(self, node):
         return node.emit_code(self)
         

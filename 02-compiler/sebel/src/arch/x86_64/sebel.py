@@ -17,15 +17,17 @@ class Colors:
     YELLOW      = 14
     WHITE       = 15
 
-_japyc_const(VGA_BASE=0xb8000)
+_japyc_const_int64(VGA_BASE=0xb8000)
 
-def print_okay():
+def print_okay() -> None:
     _japyc_poke64(VGA_BASE, 0x2f592f412f4b2f4f)
     
-def print_char(c, x, y, fg_col, bg_col):
-    _japyc_poke64(VGA_BASE+2*(x+y*80), c+256*fg_col+16*256*bg_col)
+def print_char(c:int16, x: int64, y: int64, fg_col: int16, bg_col: int16) -> None:
+    # address:int64 = VGA_BASE+2*(x+y*80)
+    # value:int16 = c+256*fg_col+16*256*bg_col
+    _japyc_poke16(VGA_BASE+2*(x+y*80), c+256*fg_col+16*256*bg_col)
 
-def sebel_main():
+def sebel_main() -> None:
     print_okay()
     # print_char('W', 26, 12, Colors.WHITE, Colors.BLACK)
     # print_char('e', 27, 12, Colors.WHITE, Colors.BLACK)
