@@ -6,13 +6,14 @@
 import ast
 import pprint
 import argparse
-
-from dataclasses import dataclass
+import errors
 
 from llvmlite import ir, binding
 binding.initialize()
 binding.initialize_native_target()
 binding.initialize_native_asmprinter()
+
+import nodes
 
 
 def ast2tree(node, include_attrs=True):
@@ -39,47 +40,15 @@ def pformat_ast(node, include_attrs=False, **kws):
     return pprint.pformat(ast2tree(node, include_attrs), **kws)
    
    
-def JapycMeta(type):
-    def __init__(cls, name, bases, dct):
-        fields = dct['_fields']
-        def __init__(self, *args):
-            for field,value in zip(fields, args):
-                setattr(self, field, value)
-        dct['__init__'] = __init__
-        return super(JapycMeta, cls).__init__(name, bases, dct)
-
-class JapycAST(ast.AST):
-    __metaclass__ = JapycMeta
-
-class JapycModule(JapycAST):
-    _fields = ['body']
-    
-class JapycFunction(JapycAST):
-    _fields = ['name', 'args', 'body']
-        
-class JapycVariable(JapycAST):
-    _fields = ['name']
-
-class JapycPoke(JapycAST):
-    _fields = ['address', 'value', 'bits']
-        
-class JapycInteger(JapycAST):
-    _fields = ['value']
-        
-class JapycChar(JapycAST):
-    _fields = ['value']
-        
-class JapycBinOp(JapycAST):
-    _fields = ['op', 'left', 'right']
-        
-class JapycFunctionCall(JapycAST):
-    _fields = ['fn', 'args']
 
 class JapycVisitor(ast.NodeVisitor):
-    def __init__(self):
-        self.enums = {}
-        
-    def _visit_with_remove(self, nodes):
+    def visit_with_remove(self, nodes):
+        '''
+        This function visits the children of the input node.  
+        It is "with remove" because it removes the parent
+        node from the tree; it will be rewrapped in a Japyc*
+        AST Node.
+        '''
         assert isinstance(nodes, list)
         res = []
         for n in nodes:
@@ -87,88 +56,75 @@ class JapycVisitor(ast.NodeVisitor):
             if tmp is not None:
                 res.append(tmp)
         return res
-        
-    def visit_Module(self, node):
-        return JapycModule(self._visit_with_remove(node.body))
-    
-    def visit_Name(self, node):
-        return JapycVariable(node.id)
-    
-    def visit_FunctionDef(self, node):
-        args = [JapycVariable(a.arg) for a in node.args.args]
-        body = self._visit_with_remove(node.body)
-        return JapycFunction(node.name, args, body)
 
+
+    def __init__(self):
+        self.constants = {}
+
+        japyc_classes = [getattr(nodes, c) for c in dir(nodes) if hasattr(getattr(nodes, c), 'derived_from')]
+
+        self.nondefaults = {}
+        self.defaults = {}
+
+        for c in japyc_classes:
+            if hasattr(c.derived_from, '__iter__'):
+                node_names = [d.__name__ for d in c.derived_from]
+                default = False
+            else:
+                node_names = [c.derived_from.__name__]
+                default = getattr(c, 'default', False)
+
+            if default:
+                if node_names[0] in self.defaults:
+                    raise errors.JapycError(f'Multiple default nodes specified for {node_names[0]}')
+                self.defaults[node_names[0]] = c
+            else:
+                for node_name in node_names:
+                    if node_name in self.nondefaults:
+                        self.nondefaults[node_name].append(c)
+                    else:
+                        self.nondefaults[node_name] = [c]
+
+    # this is a stub to strip out expression nodes
     def visit_Expr(self, node):
         return self.visit(node.value)
     
-    def visit_Call(self, node):
-        builtins = ('poke64', 'poke32', 'poke16', 'poke8')
-        if node.func.id in builtins:
-            bits = int(node.func.id[4:])
-            memory_address = self.visit(node.args[0])
-            value = self.visit(node.args[1])
-            return JapycPoke(memory_address, value, bits)
-        else:
-            return JapycFunctionCall(node.func.id, self._visit_with_remove(node.args))
-        
-    def visit_ClassDef(self, node):
-        assert len(node.bases) == 1
-        if node.bases[0].id != 'Enum':
-            raise NotImplementedError()
-        enum_dict = {}
-        for enum_node in node.body:
-            # each node in an enum classdef body is an Assign node
-            # if there are any shenanigans, go ahead and barf
-            assert isinstance(enum_node, ast.Assign)
-            assert len(enum_node.targets) == 1
-            assert isinstance(enum_node.targets[0], ast.Name)
-            assert isinstance(enum_node.value, ast.Num)
-            enum_dict[enum_node.targets[0].id] = enum_node.value.n
-        self.enums[node.name] = enum_dict
-        return None
+    # def visit_ClassDef(self, node):
+    #     assert len(node.bases) == 1
+    #     if node.bases[0].id != 'Enum':
+    #         raise NotImplementedError()
+    #     enum_dict = {}
+    #     for enum_node in node.body:
+    #         # each node in an enum classdef body is an Assign node
+    #         # if there are any shenanigans, go ahead and barf
+    #         assert isinstance(enum_node, ast.Assign)
+    #         assert len(enum_node.targets) == 1
+    #         assert isinstance(enum_node.targets[0], ast.Name)
+    #         assert isinstance(enum_node.value, ast.Num)
+    #         enum_dict[enum_node.targets[0].id] = enum_node.value.n
+    #     self.enums[node.name] = enum_dict
+    #     return None
             
-    def visit_Attribute(self, node):
-        assert isinstance(node.value, ast.Name)
-        assert node.value.id in self.enums
-        assert node.attr in self.enums[node.value.id]
-        return JapycInteger(self.enums[node.value.id][node.attr])
-    
-    def visit_Num(self, node):
-        return JapycInteger(node.n)
-    
-    def visit_BinOp(self, node):
-        left = self.visit(node.left)
-        right = self.visit(node.right)
-        def _do_op(x, y):
-            if isinstance(node.op, ast.Mult):
-                return x*y
-            elif isinstance(node.op, ast.Add):
-                return x+y
-            else:
-                raise NotImplementedError()
-        if isinstance(left, JapycInteger) and isinstance(right, JapycInteger):
-            return JapycInteger(_do_op(left.value, right.value))
-        else:
-            return JapycBinOp(node.op, self.visit(node.left), self.visit(node.right))
-        
-    def visit_Str(self, node):
-        if len(node.s) != 1:
-            raise NotImplementedError('Only 1 char long strings, please')
-        c = ord(node.s)
-        if c > 127:
-            raise NotImplementedError('Only ASCII characters for now')
-        return JapycInteger(c)
+    # def visit_Attribute(self, node):
+    #     assert isinstance(node.value, ast.Name)
+    #     assert node.value.id in self.enums
+    #     assert node.attr in self.enums[node.value.id]
+    #     return nodes.JapycInteger(self.enums[node.value.id][node.attr])
         
     def generic_visit(self, node):
-        raise NotImplementedError('Unimplemented node type: {}'.format(node.__class__.__name__))
+        ast_node_name = node.__class__.__name__
+        default_japyc_node = self.defaults.get(ast_node_name, None)
+        possible_japyc_nodes = self.nondefaults.get(ast_node_name, [])
+        for possible_japyc_node in possible_japyc_nodes:
+            res = possible_japyc_node.create_from_node(node, self, self.constants)
+            if res is not None:
+                return res
+
+        if default_japyc_node:
+            return default_japyc_node.create_from_node(node, self, self.constants)
+
+        raise NotImplementedError(f'Unimplemented node: {node}')
         
-from llvmlite import ir, binding
-binding.initialize()
-binding.initialize_native_target()
-binding.initialize_native_asmprinter()  # yes, even this one
-
-
 class LLVMEmitter(ast.NodeVisitor):
     def __init__(self, filename):
         super().__init__()
@@ -188,7 +144,7 @@ class LLVMEmitter(ast.NodeVisitor):
         self._recurse(node.body)
         return self.module
         
-    def visit_JapycFunction(self, node):
+    def visit_JapycFunctionDef(self, node):
         # hard coded return value, hardcoded 64 bit integers
         function_type = ir.FunctionType(ir.VoidType(), [ir.IntType(64) for _ in node.args])  
         fn = ir.Function(self.module, function_type, name=node.name)
@@ -220,7 +176,7 @@ class LLVMEmitter(ast.NodeVisitor):
         else:
             raise NotImplementedError()
     
-    def visit_JapycPutInt(self, node):        
+    def visit_JapycPoke(self, node):        
         int_type = ir.IntType(node.bits)
         addr = self.builder.inttoptr(self.visit(node.address), int_type.as_pointer())
         value = self.visit(node.value)
@@ -229,9 +185,11 @@ class LLVMEmitter(ast.NodeVisitor):
     def visit_JapycFunctionCall(self, node):
         args = self._recurse(node.args)
         self.builder.call(self.functions[node.fn], args)
+
         
     def generic_visit(self, node):
-        raise NotImplementedError('node type not implemented: {}'.format(node.__class__.__name__))        
+        return None
+        # raise NotImplementedError('node type not implemented: {}'.format(node.__class__.__name__))        
         
 def compile_ir(ir_module):
     """
@@ -269,10 +227,26 @@ def get_args():
         help='Output object file (must be .o, defaults to <input>.o)',
         default=argparse.SUPPRESS)
 
-    parser.add_argument('--verbose',
+    parser.add_argument('--show-python-ast',
         action='store_true',
-        help='Print additional data'
+        help='Print the AST resulting from lexing Python code'
     )
+
+    parser.add_argument('--show-japyc-ast',
+        action='store_true',
+        help='Print the transformed japyc AST'
+    )
+
+    parser.add_argument('--show-llvm-code',
+        action='store_true',
+        help='Print LLVM intermediate representation'
+    )
+
+    parser.add_argument('--show-all',
+        action='store_true',
+        help='Equivalent to --show-python-ast --show-japyc-ast --show-llvm-code'
+    )
+
 
     args = parser.parse_args()
 
@@ -289,13 +263,13 @@ def main():
         python_source = f.read()
     ast_root = ast.parse(python_source, filename=args.input)
                         
-    if args.verbose:
-        print(pformat_ast(ast_root))
+    if args.show_all or args.show_python_ast:
+        print(ast.dump(ast_root, indent=4))
     japyc_root = JapycVisitor().visit(ast_root)
-    if args.verbose:
-        print(pformat_ast(japyc_root))
+    if args.show_all or args.show_japyc_ast:
+        print(ast.dump(japyc_root, indent=4))
     ir_module = LLVMEmitter(args.input).visit(japyc_root)
-    if args.verbose:
+    if args.show_all or args.show_llvm_code:
         print(ir_module)
     
     obj_code = compile_ir(ir_module)

@@ -76,7 +76,7 @@ class JapycVisitor(ast.NodeVisitor):
         return self.visit(node.value)
     
     def visit_Call(self, node):  
-        if node.func.id == 'poke64':
+        if node.func.id == '_japyc_poke64':
             memory_address = node.args[0].n
             value = node.args[1].n
             return JapycPutInt(memory_address, value, 64)

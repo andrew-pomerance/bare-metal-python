@@ -1,0 +1,2 @@
+class JapycError(Exception):
+    pass

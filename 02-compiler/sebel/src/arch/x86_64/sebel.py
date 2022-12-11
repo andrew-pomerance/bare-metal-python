@@ -1,4 +1,5 @@
-class Colors(Enum):
+@_japyc_Enum
+class Colors:
     BLACK       = 0
     BLUE        = 1
     GREEN       = 2
@@ -15,12 +16,14 @@ class Colors(Enum):
     PINK        = 13
     YELLOW      = 14
     WHITE       = 15
-    
+
+_japyc_const(VGA_BASE=0xb8000)
+
 def print_okay():
-    poke64(0xb8000, 0x2f592f412f4b2f4f)
+    _japyc_poke64(VGA_BASE, 0x2f592f412f4b2f4f)
     
 def print_char(c, x, y, fg_col, bg_col):
-    poke64(0xb8000+2*(x+y*80), c+256*fg_col+16*256*bg_col)
+    _japyc_poke64(VGA_BASE+2*(x+y*80), c+256*fg_col+16*256*bg_col)
 
 def sebel_main():
     print_okay()
@@ -52,3 +55,4 @@ def sebel_main():
     print_char('h', 51, 12, Colors.YELLOW, Colors.GREEN)
     print_char('o', 52, 12, Colors.BLUE, Colors.GREEN)
     print_char('n', 53, 12, Colors.YELLOW, Colors.GREEN)
+    
